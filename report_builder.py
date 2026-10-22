@@ -477,6 +477,51 @@ def _format_date_and_time(ws, row_num):
     ws.cell(row_num, 17).number_format = "hh:mm"
 
 
+def _populate_store_list_from_master(wb, master_bytes: bytes):
+    """Replace legacy external Core Stores lookups with values from the uploaded Master Schedule.
+
+    The master schedule is the authoritative store source for this report. This prevents
+    the client-facing export from inheriting #VALUE! errors caused by unavailable external links.
+    """
+    if "Store List - UPDATE" not in wb.sheetnames:
+        return
+    master_wb = load_workbook(io.BytesIO(master_bytes), data_only=True, read_only=True)
+    try:
+        master_ws = master_wb[master_wb.sheetnames[0]]
+        stores = {}
+        for row in master_ws.iter_rows(min_row=3, values_only=True):
+            if len(row) < 11:
+                continue
+            epos = row[1]
+            if epos is None:
+                continue
+            key = str(epos).strip().removesuffix(".0")
+            address_parts = [str(v).strip() for v in row[6:11] if v is not None and str(v).strip()]
+            stores[key] = {
+                "region": row[0],
+                "regional_manager": row[4],
+                "area_manager": row[5],
+                "people_partner": None,  # Not supplied as a name in the Master Schedule.
+                "address": ", ".join(address_parts),
+            }
+        ws = wb["Store List - UPDATE"]
+        for r in range(3, ws.max_row + 1):
+            epos = ws.cell(r, 1).value
+            if epos is None:
+                continue
+            key = str(epos).strip().removesuffix(".0")
+            store = stores.get(key, {})
+            # Columns B:F feed the existing report lookups. Replace the external formulas
+            # with literal values from the supplied Master Schedule.
+            ws.cell(r, 2).value = store.get("region")
+            ws.cell(r, 3).value = store.get("regional_manager")
+            ws.cell(r, 4).value = store.get("area_manager")
+            ws.cell(r, 5).value = store.get("people_partner")
+            ws.cell(r, 6).value = store.get("address")
+    finally:
+        master_wb.close()
+
+
 def _set_full_recalc(wb):
     try:
         wb.calculation.fullCalcOnLoad = True
@@ -561,6 +606,10 @@ def build_report(template_bytes: bytes, csv_bytes: bytes, master_bytes: bytes, c
     summary["ytd_rows_after_append"] = max(0, ytd_final_last - 3)
     summary["period"] = int(period)
     summary["financial_year"] = financial_year
+
+    # Populate the report's store lookup table from the supplied Master Schedule.
+    # This removes legacy external Core Stores links before formula recalculation.
+    _populate_store_list_from_master(wb, master_bytes)
 
     # Summary Data is a formula-driven row-for-row view of This month.
     # Keep only rows corresponding to actual current-period audits (headers end at row 7).
